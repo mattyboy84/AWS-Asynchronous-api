@@ -1,0 +1,285 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Transform: AWS::Serverless-2016-10-31
+ 
+Parameters:
+  TargetEnvironment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+  LambdaTimeout:
+    Type: Number
+    Default: 900
+  ResultTableTimeToLiveMinutes:
+    Type: Number
+    Default: 5
+  
+Globals:
+  Function:
+    CodeUri: ./
+    Runtime: nodejs18.x
+    MemorySize: 3008
+    Timeout: !Ref LambdaTimeout
+    Environment:
+      Variables:
+        INCOMING_QUEUE_NAME: !GetAtt incomingQueue.QueueName
+        INCOMING_QUEUE_URL: !GetAtt incomingQueue.QueueUrl
+        RESULT_TABLE_NAME: !Ref resultTable
+        RESULT_TABLE_TTL_MINUTES: !Ref ResultTableTimeToLiveMinutes
+  
+Resources:
+  ApiIntegrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-ApiIntegrationRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: !Sub "${AWS::StackName}-ApiIntegrationRole-policy"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: "lambda:InvokeFunction"
+                Resource: "*"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  
+  lambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-lambdaRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: !Sub "${AWS::StackName}-lambdaRole-policy"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt incomingQueue.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource: !GetAtt resultTable.Arn
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  
+#####################
+### API RESOURCES ###
+#####################
+  
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Name: !Sub "${AWS::StackName}"
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 200
+      FailOnWarnings: true
+  
+  #Authorizer:
+  #  Type: AWS::ApiGatewayV2::Authorizer
+  #  Properties:
+  #    Name: !Sub "${AWS::StackName}-LambdaAuthorizer"
+  #    ApiId: !Ref HttpApi
+  #    AuthorizerType: REQUEST
+  #    AuthorizerCredentialsArn: !GetAtt ApiIntegrationRole.Arn
+  #    AuthorizerUri: !Join 
+  #      - ''
+  #      - - 'arn:'
+  #        - !Ref 'AWS::Partition'
+  #        - ':apigateway:'
+  #        - !Ref 'AWS::Region'
+  #        - ':lambda:path/2015-03-31/functions/'
+  #        #- !GetAtt authFunction.Arn
+  #        - /invocations
+  #    AuthorizerPayloadFormatVersion: 2.0
+  #    AuthorizerResultTtlInSeconds: 0
+  #    EnableSimpleResponses: false
+  
+############################
+### START QUERY FUNCTION ###
+############################
+  
+  startQueryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-startQueryFunction"
+      Role: !GetAtt lambdaRole.Arn
+      Handler: src/startQuery.handler
+  
+  startQueryFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['', ['/aws/lambda/', !Ref startQueryFunction]]
+  
+  startQueryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      CredentialsArn: !GetAtt ApiIntegrationRole.Arn
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Join
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':apigateway:'
+          - !Ref 'AWS::Region'
+          - ':lambda:path/2015-03-31/functions/'
+          - !GetAtt startQueryFunction.Arn
+          - /invocations
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+  
+  startQueryRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      OperationName: !Sub "${AWS::StackName}-startQueryRoute"
+      ApiId: !Ref HttpApi
+      #AuthorizationType: CUSTOM
+      #AuthorizerId: !Ref Authorizer
+      RouteKey: 'POST /StartQuery'
+      Target: !Sub "integrations/${startQueryIntegration}"
+  
+##################################
+### GET QUERY RESULTS FUNCTION ###
+##################################
+  
+  queryResultsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-queryResultsFunction"
+      Role: !GetAtt lambdaRole.Arn
+      Handler: src/queryResults.handler
+  
+  queryResultsFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['', ['/aws/lambda/', !Ref queryResultsFunction]]
+  
+  queryResultsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      CredentialsArn: !GetAtt ApiIntegrationRole.Arn
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Join
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':apigateway:'
+          - !Ref 'AWS::Region'
+          - ':lambda:path/2015-03-31/functions/'
+          - !GetAtt queryResultsFunction.Arn
+          - /invocations
+      PayloadFormatVersion: '2.0'
+  
+  queryResultsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      OperationName: !Sub "${AWS::StackName}-queryResultsRoute"
+      ApiId: !Ref HttpApi
+      #AuthorizationType: CUSTOM
+      #AuthorizerId: !Ref Authorizer
+      RouteKey: 'GET /QueryResults'
+      Target: !Sub "integrations/${queryResultsIntegration}"
+  
+################################
+### FILE PROCESSING FUNCTION ###
+################################
+  
+  processFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-processFileFunction"
+      Role: !GetAtt lambdaRole.Arn
+      Handler: src/processFunction.handler
+  
+  processFileFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['', ['/aws/lambda/', !Ref processFileFunction]]
+  
+  processFileFunctionEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      EventSourceArn: !GetAtt incomingQueue.Arn
+      FunctionName: !GetAtt processFileFunction.Arn
+      MaximumBatchingWindowInSeconds: 0
+      Enabled: true
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+  
+######################
+### TEST SQS QUEUE ###
+######################
+  
+  incomingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-incomingQueue"
+      DelaySeconds: 0 #delay that is applied to all messages by default
+      MessageRetentionPeriod: 345600 #Number of seconds that a message is retained in the queue, 60 - 1209600 (14 days)
+      SqsManagedSseEnabled: true
+      VisibilityTimeout: !Ref LambdaTimeout #Time that a message cannot be re-processed when picked up by a consumer
+      ReceiveMessageWaitTimeSeconds: 0 # 0 = short polling, > 0 = long polling
+  
+####################
+### RESULT TABLE ###
+####################
+  
+  resultTable:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      TableName: !Sub "${AWS::StackName}-resultTable"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: ttl
+      AttributeDefinitions:
+        - AttributeName: "MessageId"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "MessageId"
+          KeyType: "HASH"
+  
+Outputs:
+  HttpApiUrl:
+    Description: URL of your API endpoint
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/'
+  incomingQueueName:
+    Description: name of the incomingQueue
+    Value: !GetAtt incomingQueue.QueueName
+  incomingQueueArn:
+    Description: Arn of the incomingQueue
+    Value: !GetAtt incomingQueue.Arn
+  incomingQueueQueueUrl:
+    Description: QueueUrl of the incomingQueue
+    Value: !GetAtt incomingQueue.QueueUrl
+    

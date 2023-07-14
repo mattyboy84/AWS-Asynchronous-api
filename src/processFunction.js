@@ -32,7 +32,7 @@ async function handler(event, context) {
 
       const date = new Date();
       date.setMinutes(date.getMinutes() + RESULT_TABLE_TTL_MINUTES);
-      const ttl = ((date.getTime() / 1000).toFixed()).toString();
+      const ttl = Number((date.getTime() / 1000).toFixed());
 
       const putItemResponse = await putItem({
         tableName: RESULT_TABLE_NAME,

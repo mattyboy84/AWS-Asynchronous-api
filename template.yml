@@ -30,31 +30,6 @@ Globals:
         RESULT_TABLE_TTL_MINUTES: !Ref ResultTableTimeToLiveMinutes
   
 Resources:
-  ApiIntegrationRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "${AWS::StackName}-ApiIntegrationRole"
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - apigateway.amazonaws.com
-            Action:
-              - sts:AssumeRole
-      Path: "/"
-      Policies:
-        - PolicyName: !Sub "${AWS::StackName}-ApiIntegrationRole-policy"
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: "lambda:InvokeFunction"
-                Resource: "*"
-      ManagedPolicyArns:
-        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-  
   lambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -101,25 +76,48 @@ Resources:
         ThrottlingBurstLimit: 200
       FailOnWarnings: true
   
-  #Authorizer:
-  #  Type: AWS::ApiGatewayV2::Authorizer
-  #  Properties:
-  #    Name: !Sub "${AWS::StackName}-LambdaAuthorizer"
-  #    ApiId: !Ref HttpApi
-  #    AuthorizerType: REQUEST
-  #    AuthorizerCredentialsArn: !GetAtt ApiIntegrationRole.Arn
-  #    AuthorizerUri: !Join 
-  #      - ''
-  #      - - 'arn:'
-  #        - !Ref 'AWS::Partition'
-  #        - ':apigateway:'
-  #        - !Ref 'AWS::Region'
-  #        - ':lambda:path/2015-03-31/functions/'
-  #        #- !GetAtt authFunction.Arn
-  #        - /invocations
-  #    AuthorizerPayloadFormatVersion: 2.0
-  #    AuthorizerResultTtlInSeconds: 0
-  #    EnableSimpleResponses: false
+#####################
+### AUTH FUNCTION ###
+#####################
+  
+  authFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-authFunction"
+      Role: !GetAtt lambdaRole.Arn
+      Handler: src/authFunction.handler
+  
+  authFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['', ['/aws/lambda/', !Ref authFunction]]
+  
+  authFunctionEBPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt authFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
+  
+  Authorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      Name: !Sub "${AWS::StackName}-Authorizer"
+      ApiId: !Ref HttpApi
+      AuthorizerType: REQUEST
+      AuthorizerUri: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':apigateway:'
+          - !Ref 'AWS::Region'
+          - ':lambda:path/2015-03-31/functions/'
+          - !GetAtt authFunction.Arn
+          - /invocations
+      AuthorizerPayloadFormatVersion: 2.0
+      AuthorizerResultTtlInSeconds: 0
+      EnableSimpleResponses: true
   
 ############################
 ### START QUERY FUNCTION ###
@@ -137,11 +135,18 @@ Resources:
     Properties:
       LogGroupName: !Join ['', ['/aws/lambda/', !Ref startQueryFunction]]
   
+  startQueryFunctionEBPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt startQueryFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
+  
   startQueryIntegration:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
       ApiId: !Ref HttpApi
-      CredentialsArn: !GetAtt ApiIntegrationRole.Arn
       IntegrationType: AWS_PROXY
       IntegrationUri: !Join
         - ''
@@ -160,8 +165,8 @@ Resources:
     Properties:
       OperationName: !Sub "${AWS::StackName}-startQueryRoute"
       ApiId: !Ref HttpApi
-      #AuthorizationType: CUSTOM
-      #AuthorizerId: !Ref Authorizer
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref Authorizer
       RouteKey: 'POST /StartQuery'
       Target: !Sub "integrations/${startQueryIntegration}"
   
@@ -185,7 +190,7 @@ Resources:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
       ApiId: !Ref HttpApi
-      CredentialsArn: !GetAtt ApiIntegrationRole.Arn
+      #CredentialsArn: !GetAtt ApiIntegrationRole.Arn
       IntegrationType: AWS_PROXY
       IntegrationUri: !Join
         - ''
@@ -203,10 +208,18 @@ Resources:
     Properties:
       OperationName: !Sub "${AWS::StackName}-queryResultsRoute"
       ApiId: !Ref HttpApi
-      #AuthorizationType: CUSTOM
-      #AuthorizerId: !Ref Authorizer
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref Authorizer
       RouteKey: 'GET /QueryResults'
       Target: !Sub "integrations/${queryResultsIntegration}"
+  
+  queryResultsFunctionEBPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt queryResultsFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
   
 ################################
 ### FILE PROCESSING FUNCTION ###
